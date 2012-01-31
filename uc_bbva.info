@@ -1,0 +1,5 @@
+name = BBVA
+description = "Process payments through BBVA TPV"
+core = 6.x
+package = Ubercart - BBVA
+dependencies[] = uc_payment

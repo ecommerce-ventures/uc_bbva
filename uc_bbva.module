@@ -1,0 +1,357 @@
+<?php
+
+/**
+ * @file
+ * Accept payments through BBVA
+ *
+ */
+
+/*******************************************************************************
+ * Hook Functions (Drupal)
+ ******************************************************************************/
+
+/**
+ * Implementation of hook_menu().
+ */
+function uc_bbva_menu() {
+  $items = array();
+  $items['bbva/get'] = array(
+      'title' => t('BBVA URL'),
+      'page callback' => 'uc_bbva_get',
+      'access callback' => TRUE,
+      'type' => MENU_CALLBACK,
+  );
+  $items['bbva/return'] = array(
+      'title' => t('BBVA Return URL'),
+      'page callback' => 'uc_bbva_return',
+      'access callback' => user_access('access content'),
+      'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function uc_bbva_form_alter(&$form, $form_state, $form_id) {
+  if ($form_id == 'uc_cart_checkout_review_form' && ($order_id = intval($_SESSION['cart_order'])) > 0) {
+    $order = uc_order_load($order_id);
+    if ($order->payment_method == 'bbva') {
+
+      unset($form['submit']);
+      unset($form['back']);
+      $form['#prefix'] = '<table style="display: inline; padding-top: 1em;"><tr><td>';
+      $form['#suffix'] = '</td><td>'. drupal_get_form('uc_bbva_form', $order) .'</td></tr></table>';
+      if (variable_get('ec_bbva_skip_review', false)) {
+        //if Skip Review Screen variable is set we redirect the user to BBVA Gateway
+        $myjs = "$(document).ready(function(){
+	    			setTimeout( function() { $('form#uc-bbva-form').submit(); }, 5000 );
+			});";
+
+        drupal_add_js($myjs, 'inline');
+      }
+    }
+  }
+}
+
+
+/*******************************************************************************
+ * Hook Functions (Ubercart)
+ ******************************************************************************/
+
+/**
+ * Implementation of hook_payment_method().
+ */
+function uc_bbva_payment_method() {
+  $methods[] = array(
+    'id' => 'bbva',
+    'name' => t('BBVA'),
+    'title' => t('Credit card payment on BBVA bank secure server'),
+    'review' => t('Credit Card'),
+    'desc' => t('Redirect users to submit payments through BBVA.'),
+    'callback' => 'uc_payment_method_bbva',
+    'weight' => 1,
+    'checkout' => TRUE,
+    'backend' => TRUE,
+  );
+
+  return $methods;
+}
+
+/*******************************************************************************
+ * Callback Functions, Forms, and Tables
+ ******************************************************************************/
+// Handles the BBVA payment method.
+function uc_payment_method_bbva($op, &$arg1) {
+  switch ($op) {
+    case 'cart-details':
+    case 'customer-view':
+      return t('Continue with checkout to be redirected to BBVA secure server for payment.');
+    case 'cart-review':
+      $review[] = array('title' => t('Payment Details'), 'data' => t("Payment through BBVA secure server"));
+      return $review;
+    case 'settings':
+      $form = array();
+
+      $form['#description'] = t('Note: To process test transactions, you must adjust your account settings through your BBVA account manager.');
+       
+      $form['ec_bbva_id_terminal'] = array(
+    '#type' => 'textfield', 
+    '#title' => t('ID Terminal'), 
+    '#default_value' => variable_get('ec_bbva_id_terminal', ''), 
+    '#size' => 12, 
+    '#maxlength' => 9, 
+    '#description' => t('Terminal ID provided by BBVA'),
+    '#required' => FALSE
+      );
+      $form['ec_bbva_id_commerce'] = array(
+    '#type' => 'textfield', 
+    '#title' => t('ID Commerce'), 
+    '#default_value' => variable_get('ec_bbva_id_commerce', ''), 
+    '#size' => 25, 
+    '#maxlength' => 15, 
+    '#description' => t('Commerce ID provided by BBVA'),
+    '#required' => FALSE
+      );
+      $form['ec_bbva_key_download_pass'] = array(
+    '#type' => 'textfield', 
+    '#title' => t('Password to generate Secret key'), 
+    '#default_value' => variable_get('ec_bbva_key_download_pass', ''), 
+    '#size' => 8, 
+    '#maxlength' => 8, 
+    '#description' => t('Password asked by BBVA when Secret key was generated.'),
+    '#required' => FALSE
+      );
+      $form['ec_bbva_secret_key'] = array(
+    '#type' => 'textfield', 
+    '#title' => t('Secret key'), 
+    '#default_value' => variable_get('ec_bbva_secret_key', ''), 
+    '#size' => 64, 
+    '#maxlength' => 64, 
+    '#description' => t('Secret key to sign the messages.'),
+    '#required' => FALSE
+      );
+      $form['ec_bbva_connect_url'] = array(
+    '#type' => 'textfield', 
+    '#title' => t('BBVA Connect URL'), 
+    '#default_value' => variable_get('ec_bbva_connect_url', 'https://w3.grupobbva.com/TLPV/tlpv/TLPV_pub_RecepOpModeloServidor'), 
+    '#size' => 70, 
+    '#maxlength' => 180, 
+    '#description' => t('URL to connect to the BBVA TPV service'),
+    '#required' => FALSE
+      );
+      $form['ec_bbva_currency'] = array(
+    '#type' => 'radios',
+    '#title' => t('Currency'),
+    '#default_value' => variable_get('ec_bbva_currency', 0),
+    '#options' => array(t('Euro - €'), t('Dollar - $'), t('Sterling pound - L')),
+    '#description' => t('Currency to use for payment'),
+      );
+      $form['ec_bbva_skip_review'] = array(
+    '#type' => 'radios',
+    '#title' => t('Skip review'),
+    '#default_value' => variable_get('ec_bbva_skip_review', 0),
+    '#options' => array(false=>t('No'), true=>t('Yes')),
+    '#description' => t('Skip ubercart cart review page'),
+      );
+
+      return $form;
+  }
+}
+
+// Returns the form elements for the BBVA form.
+function uc_bbva_form($form_state, $order) {
+  global $user, $base_url;
+  // preparing form data
+  $formatted_price = sprintf("%01.2f", $order->order_total);
+  $price=explode('.',$formatted_price);
+  $amount_xml=$price[0].','.$price[1];
+  $amount=$price[0].$price[1];
+
+  $localizador=10000000000-$order->order_id;
+  //currency
+  $currency = variable_get('ec_bbva_currency', 0);
+  switch ($currency) {
+    case 0:
+      $currency = '978'; //euro
+      break;
+    case 1:
+      $currency = '840'; //dollar
+      break;
+    case 2:
+      $currency = '826'; //pound
+      break;
+  }
+
+  //id_transaction
+  $id_transaction = date('ymdHis') + 100000000000;
+
+
+  //id_terminal
+  $id_terminal = variable_get('ec_bbva_id_terminal', '');
+
+  //id_commerce
+  $id_commerce = variable_get('ec_bbva_id_commerce', '');
+
+  //url used by BBVA answer our request
+  $url_back = $base_url.'/bbva/get';
+
+  //url used by BBVA answer our request
+  $url_redirect = $base_url.'/bbva/return'.'?localizador='.$localizador;
+
+  //language
+  $language = 'es';
+
+  //download key
+  $key_download_pass = variable_get('ec_bbva_key_download_pass', '');
+
+  //secret key
+  $secret_key = variable_get('ec_bbva_secret_key', '');
+
+  //url of BBVA TPV
+  $url_tpv = trim(variable_get('ec_bbva_connect_url', ''));
+
+  $des_key=$key_download_pass.substr($id_commerce,0,9)."***";
+  $obfuscated=$secret_key;
+  $desobfuscated=_desobfuscate($obfuscated, $des_key);
+
+  //message to sign
+  $message = $id_terminal . $id_commerce . $id_transaction . $amount . $currency . $localizador . $desobfuscated;
+  $signature = strtoupper(sha1($message));
+
+  $peticion="<tpv><oppago><idterminal>".$id_terminal."</idterminal><idcomercio>".$id_commerce."</idcomercio><idtransaccion>".$id_transaction."</idtransaccion><moneda>".$currency."</moneda><importe>".$amount_xml."</importe><urlcomercio>".$url_back."</urlcomercio><idioma>".$language."</idioma> <urlredir>".$url_redirect."</urlredir><localizador>".$localizador."</localizador><firma>".$signature."</firma></oppago></tpv>";
+  $form['#action'] = $url_tpv;
+  str_replace(" ","",$peticion);
+  $form['peticion'] = array ('#type' => 'hidden', '#value' => str_replace(" ","",$peticion));
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Continuar'),
+  );
+
+  return $form;
+}
+
+// Handles the response sent by BBVA.
+function uc_bbva_get(){
+ 	global $user, $base_url;
+ 	
+ 	if(!empty($_GET['peticion'])){
+   	$resXml = simplexml_load_string($_GET['peticion']);
+    
+   	foreach ($resXml->respago as $res){
+
+   	  $coderror=(int)$res->coderror; //Coderror indicates if everything worked fine
+   	  $estado=(int)$res->estado;
+
+      //If Coderror=0000 => OK
+   	  if($coderror==0 && $estado==2){
+   	    $id_terminal = $res->idterminal;
+   	    $id_comercio = $res->idcomercio;
+   	    $idtrans=$res->idtransaccion;
+   	    $float_import=explode('.',$res->importe);
+   	    $importe = $float_import[0].$float_import[1];
+   	    $moneda = $res->moneda;
+   	    $localizador = $res->localizador;
+   	    $codautorizacion = $res->codautorizacion;
+   	    $firma = $res->firma;
+   	     
+   	    $key_download_pass = variable_get('ec_bbva_key_download_pass', '');
+   	    $secret_key = variable_get('ec_bbva_secret_key', '');
+   	    $des_key=$key_download_pass.substr($id_comercio,0,9)."***";
+   	    $obfuscated=$secret_key;
+   	    $desobfuscated=_desobfuscate($obfuscated, $des_key);
+   	    $message = $id_terminal.$id_comercio.$idtrans.$importe.$moneda.$estado.$coderror.$codautorizacion.$desobfuscated;
+   	    $signature = strtoupper(sha1($message));
+   	    
+   	    if($firma==$signature){
+   	      $order_id = 10000000000 - (float)$localizador;
+   	      watchdog('uc_bbva', t('Order !order_id accepted', array('!order_id' => intval($order_id)) ));
+   	      $order = uc_order_load($order_id);
+   	      // set correspondent to paid status
+   	      uc_payment_enter($order->order_id, 'bbva', $order->order_total, 0, NULL, $comment);
+
+   	      //create anon account
+   	      uc_cart_complete_sale($order);
+
+   	      uc_order_update_status($order->order_id, 'payment_received');
+
+   	      // Empty the cart.
+   	      uc_cart_empty(uc_cart_get_id());
+   	      exit();
+   	    }else{
+   	      watchdog('uc_bbva', t('Order !order_id DENIED (Response = !response)', array('!order_id' => intval($order_id), '!response' => "Bad signature") ));
+   	      exit();
+   	    }
+   	     
+   	  }else{
+   	    watchdog('uc_bbva', t('Order !order_id DENIED (Response = !response)', array('!order_id' => intval($order_id), '!response' => intval($coderror)) ));
+   	    exit();
+   	  }
+   	}
+ 	}
+}
+
+function uc_bbva_return() {
+  global $user, $base_url;
+
+  if(!empty($_GET['localizador'])){
+    $localizador=$_GET['localizador'];
+    $order_id = 10000000000 - (float)$localizador;
+    $order = uc_order_load($order_id);
+    if($order->order_status=='payment_received' || $order->order_status=='completed'){
+      uc_cart_empty(uc_cart_get_id());
+      // This lets us know it's a legitimate access of the complete page.
+      $_SESSION['do_complete'] = TRUE;
+      drupal_goto('cart/checkout/complete');
+    }else{
+      drupal_goto('cart/checkout/review');
+    }
+  }else{
+    drupal_goto('cart/checkout/review');
+  }
+}
+
+function _desobfuscate($secret_key,$xor_key)
+{
+  $cad1_0 = "0";
+  $cad2_0 = "00";
+  $cad3_0 = "000";
+  $cad4_0 = "0000";
+  $cad5_0 = "00000";
+  $cad6_0 = "000000";
+  $cad7_0 = "0000000";
+  $cad8_0 = "00000000";
+  $pal_sec = "";
+
+  $trozos = explode (";", $secret_key);
+  $tope = count($trozos);
+
+  for ($i=0; $i<$tope ; $i++)
+  {
+    $res = "";
+    $pal_sec_ofus_bytes[$i] = decbin(hexdec($trozos[$i]));
+    if (strlen($pal_sec_ofus_bytes[$i]) == 7){ $pal_sec_ofus_bytes[$i] = $cad1_0.$pal_sec_ofus_bytes[$i]; }
+    if (strlen($pal_sec_ofus_bytes[$i]) == 6){ $pal_sec_ofus_bytes[$i] = $cad2_0.$pal_sec_ofus_bytes[$i]; }
+    if (strlen($pal_sec_ofus_bytes[$i]) == 5){ $pal_sec_ofus_bytes[$i] = $cad3_0.$pal_sec_ofus_bytes[$i]; }
+    if (strlen($pal_sec_ofus_bytes[$i]) == 4){ $pal_sec_ofus_bytes[$i] = $cad4_0.$pal_sec_ofus_bytes[$i]; }
+    if (strlen($pal_sec_ofus_bytes[$i]) == 3){ $pal_sec_ofus_bytes[$i] = $cad5_0.$pal_sec_ofus_bytes[$i]; }
+    if (strlen($pal_sec_ofus_bytes[$i]) == 2){ $pal_sec_ofus_bytes[$i] = $cad6_0.$pal_sec_ofus_bytes[$i]; }
+    if (strlen($pal_sec_ofus_bytes[$i]) == 1){ $pal_sec_ofus_bytes[$i] = $cad7_0.$pal_sec_ofus_bytes[$i]; }
+    $pal_sec_xor_bytes[$i] = decbin(ord($xor_key[$i]));
+    if (strlen($pal_sec_xor_bytes[$i]) == 7){ $pal_sec_xor_bytes[$i] = $cad1_0.$pal_sec_xor_bytes[$i]; }
+    if (strlen($pal_sec_xor_bytes[$i]) == 6){ $pal_sec_xor_bytes[$i] = $cad2_0.$pal_sec_xor_bytes[$i]; }
+    if (strlen($pal_sec_xor_bytes[$i]) == 5){ $pal_sec_xor_bytes[$i] = $cad3_0.$pal_sec_xor_bytes[$i]; }
+    if (strlen($pal_sec_xor_bytes[$i]) == 4){ $pal_sec_xor_bytes[$i] = $cad4_0.$pal_sec_xor_bytes[$i]; }
+    if (strlen($pal_sec_xor_bytes[$i]) == 3){ $pal_sec_xor_bytes[$i] = $cad5_0.$pal_sec_xor_bytes[$i]; }
+    if (strlen($pal_sec_xor_bytes[$i]) == 2){ $pal_sec_xor_bytes[$i] = $cad6_0.$pal_sec_xor_bytes[$i]; }
+    if (strlen($pal_sec_xor_bytes[$i]) == 1){ $pal_sec_xor_bytes[$i] = $cad7_0.$pal_sec_xor_bytes[$i]; }
+    for ($j=0; $j<8; $j++)
+    {
+      (string)$res .= (int)$pal_sec_ofus_bytes[$i][$j] ^ (int)$pal_sec_xor_bytes[$i][$j];
+    }
+    $xor[$i] = $res;
+    $pal_sec .= chr(bindec($xor[$i]));
+  }
+  return $pal_sec;
+}
